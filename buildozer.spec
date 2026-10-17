@@ -7,7 +7,7 @@ source.dir = .
 # ttf مهمة: بدونها لن يدخل الخط العربي Sahel.ttf في الـ APK
 source.include_exts = py,png,ttf
 source.exclude_dirs = bin, .buildozer, venv, __pycache__, .git, .github
-source.exclude_patterns = *.pem, *.csv, *.log
+source.exclude_patterns = *.pem, *.csv, *.log, keygen.py
 
 version = 1.0
 

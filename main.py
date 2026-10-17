@@ -5,7 +5,11 @@
 - الخط: ضع Sahel.ttf (و Sahel-Bold.ttf إن وجد) بجانب هذا الملف
 - المكتبات: pip install kivy arabic-reshaper python-bidi
 """
+import hashlib
+import hmac
+import json
 import os
+import time
 from datetime import datetime
 
 import arabic_reshaper
@@ -25,6 +29,7 @@ except Exception:
                            for p in parts[::-1])
 
 from kivy.app import App
+from kivy.core.text import Label as CoreLabel
 from kivy.core.text import LabelBase
 from kivy.core.window import Window
 from kivy.graphics import Color, Line, Mesh, Rectangle
@@ -33,6 +38,7 @@ from kivy.properties import ListProperty, NumericProperty
 from kivy.resources import resource_find
 from kivy.uix.behaviors import ButtonBehavior, ToggleButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
 from kivy.uix.screenmanager import Screen, ScreenManager, SlideTransition
@@ -75,12 +81,12 @@ def ar(text):
 # ----------------------------------------------------------------------
 T = {
     'title':        'حاسبة الرسوم العقارية',
-    'subtitle':     'رسوم البيع وضريبة IRG على فائض القيمة',
+    'subtitle':     'رسوم البيع وضريبة  IRG  على فائض القيمة',
     'unit':         'مليون',
-    'price':        'سعر البيع (بالمليون)',
+    'price':        'سعر البيع بالمليون',
     'price_hint':   'مثال: 120',
     'tab_fees':     'الرسوم',
-    'tab_irg':      'ضريبة IRG',
+    'tab_irg':      'ضريبة  IRG',
     'calc':         'احسب',
     'clear':        'مسح',
 
@@ -94,7 +100,7 @@ T = {
     'row_total':    'المجموع',
     'grand_total':  'المجموع الكلي',
 
-    'buy_price':    'سعر الشراء (بالمليون)',
+    'buy_price':    'سعر الشراء بالمليون',
     'buy_hint':     'سعر الاقتناء',
     'year':         'سنة البناء',
     'year_hint':    '2005',
@@ -104,6 +110,22 @@ T = {
     'discount':     'نسبة التخفيض',
     'net':          'الوعاء الصافي',
     'tax':          'قيمة الضريبة',
+
+    # --- الترخيص ---
+    'trial_left':   'فترة تجريبية: متبقي {n} يوم',
+    'activated':    'نسخة مفعّلة',
+    'activate_btn': 'تفعيل',
+    'lock_title':   'انتهت الفترة التجريبية',
+    'act_title':    'تفعيل التطبيق',
+    'lock_body':    'للاستمرار في الاستخدام فعّل التطبيق بسعر {price} دج. أرسل رقم الجهاز التالي لتحصل على رمز التفعيل.',
+    'device_lbl':   'رقم الجهاز',
+    'code_lbl':     'رمز التفعيل',
+    'code_hint':    'XXXX-XXXX-XXXX',
+    'do_activate':  'تفعيل',
+    'later':        'متابعة التجربة',
+    'bad_code':     'رمز التفعيل غير صحيح',
+    'ok_code':      'تم التفعيل بنجاح',
+    'contact':      '',   # مثال: 'للتواصل: 0555 00 00 00'
 }
 
 # ----------------------------------------------------------------------
@@ -183,6 +205,92 @@ def money(x):
 
 
 # ----------------------------------------------------------------------
+#  الترخيص: فترة تجريبية ثم تفعيل برمز مرتبط برقم الجهاز
+# ----------------------------------------------------------------------
+TRIAL_DAYS = 7
+PRICE_DA = 5000
+# مفتاح سري: يجب أن يطابق ما في keygen.py (غيّره إلى قيمتك قبل النشر)
+SECRET = b'4f2b7273efe1abb61fe6f0e33c2d6f65'
+
+
+def get_device_id():
+    """رقم الجهاز: ANDROID_ID على أندرويد، وإلا رقم عشوائي محفوظ."""
+    try:
+        from jnius import autoclass
+        act = autoclass('org.kivy.android.PythonActivity').mActivity
+        secure = autoclass('android.provider.Settings$Secure')
+        did = secure.getString(act.getContentResolver(), secure.ANDROID_ID)
+        if did:
+            return str(did).upper()
+    except Exception:
+        pass
+    return None
+
+
+def make_code(device_id):
+    mac = hmac.new(SECRET, device_id.upper().encode(), hashlib.sha256)
+    h = mac.hexdigest()[:12].upper()
+    return '-'.join(h[i:i + 4] for i in range(0, 12, 4))
+
+
+def code_ok(device_id, code):
+    given = ''.join(ch for ch in code.upper() if ch.isalnum())
+    want = make_code(device_id).replace('-', '')
+    return hmac.compare_digest(given, want)
+
+
+class License:
+    """يحفظ بداية التجربة و رمز التفعيل في ملف داخل مجلد التطبيق."""
+
+    def __init__(self, folder):
+        self.path = os.path.join(folder, 'license.json')
+        self.data = {}
+        try:
+            with open(self.path, 'r', encoding='utf-8') as f:
+                self.data = json.load(f)
+        except Exception:
+            self.data = {}
+        now = time.time()
+        self.data.setdefault('start', now)
+        if not self.data.get('uid'):
+            self.data['uid'] = hashlib.sha1(
+                (str(now) + os.urandom(8).hex()).encode()).hexdigest()[:16].upper()
+        # حماية بسيطة من إرجاع ساعة الهاتف إلى الوراء
+        self.data['last'] = max(self.data.get('last', now), now)
+        self.save()
+        self.device_id = get_device_id() or self.data['uid']
+
+    def save(self):
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            with open(self.path, 'w', encoding='utf-8') as f:
+                json.dump(self.data, f)
+        except Exception:
+            pass
+
+    @property
+    def activated(self):
+        c = self.data.get('code')
+        return bool(c) and code_ok(self.device_id, c)
+
+    @property
+    def days_left(self):
+        used = (self.data['last'] - self.data['start']) / 86400.0
+        return max(0, int(TRIAL_DAYS - used + 0.999))
+
+    @property
+    def locked(self):
+        return not self.activated and self.days_left <= 0
+
+    def activate(self, code):
+        if code_ok(self.device_id, code):
+            self.data['code'] = code
+            self.save()
+            return True
+        return False
+
+
+# ----------------------------------------------------------------------
 #  أدوات الرسم: مضلعات محدبة بزوايا مائلة
 # ----------------------------------------------------------------------
 def set_poly(mesh, pts):
@@ -223,13 +331,45 @@ def gloss_pts(x, y, w, h, s):
 # ----------------------------------------------------------------------
 #  عناصر الواجهة
 # ----------------------------------------------------------------------
+class ArLabel(Label):
+    """نص عربي يلتف على الأسطر بشكل صحيح (الأسطر تُقسَّم قبل قلب الاتجاه)."""
+
+    def __init__(self, ltext='', **kw):
+        self._ltext = ltext
+        super().__init__(**kw)
+        self.bind(width=self._rewrap, font_size=self._rewrap,
+                  padding=self._rewrap)
+        self._rewrap()
+
+    def _measure(self, text):
+        cl = CoreLabel(font_name=self.font_name, font_size=self.font_size,
+                       bold=self.bold)
+        return cl.get_extents(text)[0]
+
+    def _rewrap(self, *a):
+        avail = self.width - self.padding[0] - self.padding[2]
+        lines, cur = [], ''
+        for word in self._ltext.split():
+            trial = (cur + ' ' + word).strip()
+            if cur and avail > 20 and self._measure(ar(trial)) > avail:
+                lines.append(cur)
+                cur = word
+            else:
+                cur = trial
+        if cur:
+            lines.append(cur)
+        self.text = '\n'.join(ar(l) for l in lines)
+
+
 def L(text='', shape=True, halign='right', **kw):
     """Label جاهز: خط عربي + محاذاة + منتصف عمودي."""
     kw.setdefault('font_name', FONT)
     kw.setdefault('color', TEXT)
     kw.setdefault('font_size', sp(15))
-    lbl = Label(text=ar(text) if (shape and text) else text,
-                halign=halign, valign='middle', **kw)
+    if shape and text:
+        lbl = ArLabel(ltext=text, halign=halign, valign='middle', **kw)
+    else:
+        lbl = Label(text=text, halign=halign, valign='middle', **kw)
     lbl.bind(size=lambda w, s: setattr(w, 'text_size', s))
     return lbl
 
@@ -404,9 +544,11 @@ def table_row(item, buyer='—', seller='—', bold=False, head=False):
 # ----------------------------------------------------------------------
 #  الواجهة الرئيسية
 # ----------------------------------------------------------------------
-class MyWidget(BoxLayout):
+class MainView(BoxLayout):
 
-    def __init__(self, **kw):
+    def __init__(self, lic=None, on_activate=None, **kw):
+        self.lic = lic
+        self._on_activate = on_activate
         super().__init__(orientation='vertical',
                          padding=[dp(12), dp(10), dp(12), dp(10)],
                          spacing=dp(10), **kw)
@@ -422,6 +564,7 @@ class MyWidget(BoxLayout):
         self._build_price()
         self._build_tabs()
         self._build_screens()
+        self._build_status()
         self.recalc()
 
     # ---------- خلفية ----------
@@ -601,6 +744,30 @@ class MyWidget(BoxLayout):
         self.k_single.state = 'down'
         self.recalc()
 
+    # ---------- شريط الحالة / التفعيل ----------
+    def _build_status(self):
+        row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(10),
+                        padding=[dp(6), 0])
+        self.status = L('', color=MUTED, font_size=sp(13), shape=False)
+        self.btn_act = SkewButton(text=T['activate_btn'], size_hint_x=0.3,
+                                  font_size=sp(14))
+        self.btn_act.bind(on_release=lambda *_: self._on_activate and
+                          self._on_activate())
+        row.add_widget(self.btn_act)
+        row.add_widget(self.status)
+        self.add_widget(row)
+        self.refresh_status()
+
+    def refresh_status(self):
+        if not self.lic:
+            return
+        if self.lic.activated:
+            self.status.text = ar(T['activated'])
+            self.btn_act.opacity = 0
+            self.btn_act.disabled = True
+        else:
+            self.status.text = ar(T['trial_left'].format(n=self.lic.days_left))
+
     # ---------- الحساب (نفس منطق frais و frais1) ----------
     def recalc(self, *a):
         self.frais()
@@ -637,6 +804,117 @@ class MyWidget(BoxLayout):
         self.v_tax.text = money(d['tax'])
 
 
+class Modal(FloatLayout):
+    """طبقة تحجب اللمس عمّا تحتها."""
+
+    def on_touch_down(self, touch):
+        super().on_touch_down(touch)
+        return True
+
+    def on_touch_move(self, touch):
+        super().on_touch_move(touch)
+        return True
+
+    def on_touch_up(self, touch):
+        super().on_touch_up(touch)
+        return True
+
+
+class MyWidget(FloatLayout):
+
+    def __init__(self, data_dir='.', **kw):
+        super().__init__(**kw)
+        self.lic = License(data_dir)
+        self.main = MainView(lic=self.lic, on_activate=self.show_activation,
+                             size_hint=(1, 1))
+        self.add_widget(self.main)
+        self.modal = None
+        if self.lic.locked:
+            self.show_activation()
+
+    def show_activation(self):
+        if self.modal:
+            return
+        Window.release_all_keyboards()
+        locked = self.lic.locked
+        modal = Modal()
+        with modal.canvas.before:
+            Color(0, 0, 0, 0.78)
+            dim = Rectangle(pos=modal.pos, size=modal.size)
+        modal.bind(pos=lambda w, v: setattr(dim, 'pos', v),
+                   size=lambda w, v: setattr(dim, 'size', v))
+
+        card = Panel(fill=PANEL, edge=ACCENT, cut=dp(18),
+                     size_hint=(0.92, None), height=dp(470),
+                     pos_hint={'center_x': 0.5, 'center_y': 0.55},
+                     padding=[dp(16), dp(14)], spacing=dp(8))
+        card.add_widget(L(T['lock_title'] if locked else T['act_title'],
+                          bold=True, color=ACCENT, font_size=sp(22),
+                          size_hint_y=None, height=dp(40)))
+        card.add_widget(L(T['lock_body'].replace('{price}', str(PRICE_DA)),
+                          color=TEXT, font_size=sp(14), size_hint_y=None,
+                          height=dp(84)))
+        if T['contact']:
+            card.add_widget(L(T['contact'], color=MUTED, font_size=sp(13),
+                              size_hint_y=None, height=dp(24)))
+
+        card.add_widget(L(T['device_lbl'], color=MUTED, font_size=sp(13),
+                          size_hint_y=None, height=dp(20)))
+        dev = Panel(fill=FIELD, cut=dp(10), orientation='horizontal',
+                    padding=[dp(12), 0], size_hint_y=None, height=dp(46))
+        dev_in = TextInput(text=self.lic.device_id, readonly=True,
+                           multiline=False, font_size=sp(17), halign='center',
+                           background_normal='', background_active='',
+                           background_color=(0, 0, 0, 0),
+                           foreground_color=ACCENT, cursor_color=ACCENT)
+        dev_in.bind(size=lambda w, *_: setattr(
+            w, 'padding', [0, max(0, (w.height - w.line_height) / 2.0)] * 2))
+        dev.add_widget(dev_in)
+        card.add_widget(dev)
+
+        code_field = Field(T['code_lbl'], T['code_hint'], input_filter=None)
+        code_field.input.halign = 'center'
+        card.add_widget(code_field)
+
+        msg = L('', shape=False, halign='center', color=DANGER,
+                font_size=sp(14), size_hint_y=None, height=dp(26))
+        card.add_widget(msg)
+
+        btns = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(10),
+                         padding=[dp(6), 0])
+        if not locked:
+            later = SkewButton(text=T['later'], size_hint_x=0.45,
+                               bg=TAB_OFF, bg_down=PANEL_EDGE, fg=TEXT,
+                               fg_down=TEXT, font_size=sp(15))
+            later.bind(on_release=lambda *_: self._close_modal())
+            btns.add_widget(later)
+        go = SkewButton(text=T['do_activate'])
+
+        def do(*_):
+            if self.lic.activate(code_field.input.text):
+                msg.color = ACCENT
+                msg.text = ar(T['ok_code'])
+                self.main.refresh_status()
+                from kivy.clock import Clock
+                Clock.schedule_once(lambda dt: self._close_modal(), 0.9)
+            else:
+                msg.color = DANGER
+                msg.text = ar(T['bad_code'])
+        go.bind(on_release=do)
+        btns.add_widget(go)
+        card.add_widget(btns)
+
+        modal.add_widget(card)
+        self.modal = modal
+        self.add_widget(modal)
+
+    def _close_modal(self):
+        if self.modal:
+            Window.release_all_keyboards()
+            self.remove_widget(self.modal)
+            self.modal = None
+
+
 class MyApp(App):
     title = 'IRG Calc'
 
@@ -646,7 +924,7 @@ class MyApp(App):
             Window.size = (400, 760)
         else:
             Window.softinput_mode = 'below_target'
-        return MyWidget()
+        return MyWidget(data_dir=self.user_data_dir)
 
 
 if __name__ == '__main__':
