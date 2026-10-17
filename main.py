@@ -12,8 +12,17 @@ import arabic_reshaper
 
 try:
     from bidi.algorithm import get_display
-except ImportError:                      # python-bidi >= 0.5
-    from bidi import get_display
+except Exception:
+    try:                                 # python-bidi >= 0.5
+        from bidi import get_display
+    except Exception:                    # احتياطي: لا يتوقف التطبيق إن غابت المكتبة
+        import re as _re
+        _AR = '\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF'
+
+        def get_display(text):
+            parts = _re.findall('[%s]+|[^%s]+' % (_AR, _AR), text)
+            return ''.join(p[::-1] if _re.match('[%s]' % _AR, p) else p
+                           for p in parts[::-1])
 
 from kivy.app import App
 from kivy.core.text import LabelBase
