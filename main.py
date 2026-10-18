@@ -11,6 +11,7 @@ import json
 import os
 import time
 from datetime import datetime
+from urllib.parse import quote
 
 import arabic_reshaper
 
@@ -29,10 +30,11 @@ except Exception:
                            for p in parts[::-1])
 
 from kivy.app import App
+from kivy.core.clipboard import Clipboard
 from kivy.core.text import Label as CoreLabel
 from kivy.core.text import LabelBase
 from kivy.core.window import Window
-from kivy.graphics import Color, Line, Mesh, Rectangle
+from kivy.graphics import Color, Line, Mesh, Rectangle, RoundedRectangle
 from kivy.metrics import dp, sp
 from kivy.properties import ListProperty, NumericProperty
 from kivy.resources import resource_find
@@ -115,6 +117,8 @@ T = {
     'trial_left':   'فترة تجريبية: متبقي {n} يوم',
     'activated':    'نسخة مفعّلة',
     'activate_btn': 'تفعيل',
+    'share_btn':    'واتساب',
+    'share_empty':  'أدخل البيانات أولاً',
     'lock_title':   'انتهت الفترة التجريبية',
     'act_title':    'تفعيل التطبيق',
     'lock_body':    'للاستمرار في الاستخدام فعّل التطبيق بسعر {price} دج. أرسل رقم الجهاز التالي لتحصل على رمز التفعيل.',
@@ -123,6 +127,10 @@ T = {
     'code_hint':    'XXXX-XXXX-XXXX',
     'do_activate':  'تفعيل',
     'later':        'متابعة التجربة',
+    'copy_id':      'نسخ الرقم',
+    'copied':       'تم نسخ الرقم',
+    'wa_send':      'طلب التفعيل واتساب',
+    'wa_msg':       'طلب تفعيل حاسبة الرسوم العقارية\nرقم الجهاز: {id}',
     'bad_code':     'رمز التفعيل غير صحيح',
     'ok_code':      'تم التفعيل بنجاح',
     'contact':      '',   # مثال: 'للتواصل: 0555 00 00 00'
@@ -197,6 +205,20 @@ def to_num(text):
         return None
 
 
+def share_whatsapp(text, phone=''):
+    """يفتح واتساب بالرسالة جاهزة (على أندرويد عبر Intent، وإلا بالمتصفح)."""
+    url = 'https://wa.me/%s?text=%s' % (phone, quote(text))
+    try:
+        from jnius import autoclass
+        Intent = autoclass('android.content.Intent')
+        Uri = autoclass('android.net.Uri')
+        act = autoclass('org.kivy.android.PythonActivity').mActivity
+        act.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    except Exception:
+        import webbrowser
+        webbrowser.open(url)
+
+
 UNIT = ar(T['unit'])
 
 
@@ -209,6 +231,8 @@ def money(x):
 # ----------------------------------------------------------------------
 TRIAL_DAYS = 7
 PRICE_DA = 5000
+# رقم واتساب الخاص بك بالصيغة الدولية، مثال: '213555123456' (فارغ = يختار الزبون الجهة)
+DEV_PHONE = ''
 # مفتاح سري: يجب أن يطابق ما في keygen.py (غيّره إلى قيمتك قبل النشر)
 SECRET = b'4f2b7273efe1abb61fe6f0e33c2d6f65'
 
@@ -318,6 +342,21 @@ def para_pts(x, y, w, h, s):
     return [x + s, y, x + w, y, x + w - s, y + h, x, y + h]
 
 
+def cut_pts(x, y, w, h, c):
+    """مستطيل بأربع زوايا مقطوعة بشكل مائل."""
+    c = max(0, min(c, w / 3.0, h / 2.5))
+    return [x + c, y, x + w - c, y, x + w, y + c, x + w, y + h - c,
+            x + w - c, y + h, x + c, y + h, x, y + h - c, x, y + c]
+
+
+def cut_gloss_pts(x, y, w, h, c):
+    """النصف العلوي من المستطيل المقطوع الزوايا (لمعة خفيفة)."""
+    c = max(0, min(c, w / 3.0, h / 2.5))
+    m = y + h * 0.5
+    return [x, m, x + w, m, x + w, y + h - c, x + w - c, y + h,
+            x + c, y + h, x, y + h - c]
+
+
 def gloss_pts(x, y, w, h, s):
     """النصف العلوي من متوازي الأضلاع (لمعة خفيفة)."""
     s = max(0, min(s, w / 3.0))
@@ -406,7 +445,64 @@ class Panel(BoxLayout):
 
 
 class SkewButton(ButtonBehavior, Label):
-    """زر بشكل متوازي أضلاع (رؤوس مائلة) مع ظل و لمعة."""
+    """زر مستطيل بحواف مدوّرة: خلفية داكنة + إطار ملوّن + نص أبيض عريض.
+    bg = لون الإطار (والخلفية تُشتق منه بدرجة أغمق)."""
+    bg = ListProperty(ACCENT)
+    bg_down = ListProperty(ACCENT_DARK)
+    fg = ListProperty(TEXT)
+    fg_down = ListProperty(TEXT)
+    skew = NumericProperty(dp(14))          # نصف قطر الحواف
+
+    def __init__(self, **kw):
+        if kw.pop('shape', True) and kw.get('text'):
+            kw['text'] = ar(kw['text'])
+        kw.setdefault('font_name', FONT)
+        kw.setdefault('font_size', sp(17))
+        kw.setdefault('bold', True)
+        super().__init__(**kw)
+        with self.canvas.before:
+            self._cf = Color(0, 0, 0, 1)
+            self._body = RoundedRectangle(radius=[self.skew])
+            self._ce = Color(1, 1, 1, 1)
+            self._ln = Line(rounded_rectangle=(0, 0, 10, 10, self.skew),
+                            width=dp(1.5))
+        self.bind(pos=self._draw, size=self._draw, state=self._draw,
+                  bg=self._draw, bg_down=self._draw, fg=self._draw,
+                  fg_down=self._draw, skew=self._draw)
+        self._draw()
+
+    @staticmethod
+    def _shade(c, k):
+        return [c[0] * k, c[1] * k, c[2] * k, 1]
+
+    def _draw(self, *a):
+        x, y = self.pos
+        w, h = self.size
+        down = self.state == 'down'
+        edge = self.bg_down if down else self.bg
+        self._cf.rgba = self._shade(edge, 0.30 if not down else 0.45)
+        self._ce.rgba = edge
+        self._body.pos = (x, y)
+        self._body.size = (w, h)
+        self._body.radius = [self.skew]
+        self._ln.rounded_rectangle = (x, y, w, h, self.skew)
+        self.color = self.fg_down if down else self.fg
+
+
+class SkewToggle(ToggleButtonBehavior, SkewButton):
+    """نسخة اختيارية (تبويب / خيار) من الزر المائل."""
+
+    def __init__(self, **kw):
+        kw.setdefault('bg', TAB_OFF)
+        kw.setdefault('bg_down', ACCENT)
+        kw.setdefault('fg', MUTED)
+        kw.setdefault('fg_down', TEXT)
+        kw.setdefault('font_size', sp(16))
+        super().__init__(**kw)
+
+
+class ParaButton(ButtonBehavior, Label):
+    """زر بشكل متوازي أضلاع (رؤوس مائلة) مع ظل و لمعة - يُستعمل للتبويبين الرئيسيين."""
     bg = ListProperty(ACCENT)
     bg_down = ListProperty(ACCENT_DARK)
     fg = ListProperty(INK)
@@ -440,18 +536,14 @@ class SkewButton(ButtonBehavior, Label):
         lift = 0 if down else depth
         hh = h - depth
         set_poly(self._shadow, para_pts(x, y, w, hh, self.skew))
-        set_poly(self._body, para_pts(x, y + lift - (0 if down else 0), w, hh,
-                                      self.skew))
+        set_poly(self._body, para_pts(x, y + lift, w, hh, self.skew))
         set_poly(self._gloss, gloss_pts(x, y + lift, w, hh, self.skew))
         self._cbody.rgba = self.bg_down if down else self.bg
         self.color = self.fg_down if down else self.fg
-        # يرفع النص قليلاً مع الجسم
         self.padding = (0, 0, 0, 0 if down else depth)
 
 
-class SkewToggle(ToggleButtonBehavior, SkewButton):
-    """نسخة اختيارية (تبويب / خيار) من الزر المائل."""
-
+class ParaToggle(ToggleButtonBehavior, ParaButton):
     def __init__(self, **kw):
         kw.setdefault('bg', TAB_OFF)
         kw.setdefault('bg_down', ACCENT)
@@ -548,6 +640,8 @@ class MainView(BoxLayout):
 
     def __init__(self, lic=None, on_activate=None, **kw):
         self.lic = lic
+        self.res_fees = None
+        self.res_irg = None
         self._on_activate = on_activate
         super().__init__(orientation='vertical',
                          padding=[dp(12), dp(10), dp(12), dp(10)],
@@ -594,9 +688,9 @@ class MainView(BoxLayout):
     def _build_tabs(self):
         row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8),
                         padding=[dp(6), 0])
-        self.tab_irg = SkewToggle(text=T['tab_irg'], group='tabs',
+        self.tab_irg = ParaToggle(text=T['tab_irg'], group='tabs',
                                   allow_no_selection=False)
-        self.tab_fees = SkewToggle(text=T['tab_fees'], group='tabs',
+        self.tab_fees = ParaToggle(text=T['tab_fees'], group='tabs',
                                    allow_no_selection=False, state='down')
         self._exclusive(self.tab_fees, self.tab_irg)
         self.tab_fees.bind(state=lambda w, s: s == 'down' and self._show('fees'))
@@ -748,7 +842,7 @@ class MainView(BoxLayout):
     def _build_status(self):
         row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(10),
                         padding=[dp(6), 0])
-        self.status = L('', color=MUTED, font_size=sp(13), shape=False)
+        self.status = L('', color=MUTED, font_size=sp(12), shape=False)
         self.btn_act = SkewButton(text=T['activate_btn'], size_hint_x=0.3,
                                   font_size=sp(14))
         self.btn_act.bind(on_release=lambda *_: self._on_activate and
@@ -768,6 +862,48 @@ class MainView(BoxLayout):
         else:
             self.status.text = ar(T['trial_left'].format(n=self.lic.days_left))
 
+    # ---------- مشاركة واتساب ----------
+    def _share_text(self):
+        f = lambda x: f'{x:,.2f}'
+        u = T['unit']
+        if self.sm.current == 'fees':
+            if not self.res_fees:
+                return ''
+            v, d = self.res_fees
+            names = (T['row_reg'], T['row_notary'], T['row_pub'])
+            lines = [T['title'], '',
+                     f"سعر البيع: {f(v)} {u}",
+                     f"{T['twenty']}: {f(d['tris'])} {u}", '']
+            for n, b, s_ in zip(names, d['buyer'], d['seller']):
+                lines.append(f"{n}: {T['col_buyer']} {f(b)} | "
+                             f"{T['col_seller']} {f(s_)}")
+            lines.append(f"{T['row_total']}: {T['col_buyer']} "
+                         f"{f(d['buyer'][3])} | {T['col_seller']} "
+                         f"{f(d['seller'][3])}")
+            lines += ['', f"{T['grand_total']}: {f(d['total'])} {u}"]
+            return '\n'.join(lines)
+        if not self.res_irg:
+            return ''
+        sale, buy, yr, coll, d = self.res_irg
+        kind = T['collective'] if coll else T['single']
+        lines = [T['title'], '',
+                 f"سعر البيع: {f(sale)} {u}",
+                 f"سعر الشراء: {f(buy)} {u}",
+                 f"{T['year']}: {yr}",
+                 f"{kind}", '',
+                 f"{T['gain']}: {f(d['gain'])} {u}",
+                 f"{T['discount']}: {d['rate'] * 100:g}%",
+                 f"{T['net']}: {f(d['net'])} {u}",
+                 f"{T['tax']}: {f(d['tax'])} {u}"]
+        return '\n'.join(lines)
+
+    def share(self, *a):
+        msg = self._share_text()
+        if not msg:
+            self.status.text = ar(T['share_empty'])
+            return
+        share_whatsapp(msg)
+
     # ---------- الحساب (نفس منطق frais و frais1) ----------
     def recalc(self, *a):
         self.frais()
@@ -776,12 +912,14 @@ class MainView(BoxLayout):
     def frais(self):
         v = to_num(self.price.input.text)
         if v is None:
+            self.res_fees = None
             self.tris.text = '—'
             self.grand_val.text = '—'
             for b, s in self.cells:
                 b.text = s.text = '—'
             return
         d = calc_fees(v)
+        self.res_fees = (v, d)
         self.tris.text = money(d['tris'])
         for (b, s), bv, sv in zip(self.cells, d['buyer'], d['seller']):
             b.text = f'{bv:,.2f}'
@@ -794,10 +932,12 @@ class MainView(BoxLayout):
         yr = to_num(self.year.input.text)
         collective = self.k_coll.state == 'down'
         if sale is None or buy is None or yr is None:
+            self.res_irg = None
             self.v_gain.text = self.v_rate.text = self.v_net.text = '—'
             self.v_tax.text = '—'
             return
         d = calc_irg(sale, buy, int(yr), collective)
+        self.res_irg = (sale, buy, int(yr), collective, d)
         self.v_gain.text = money(d['gain'])
         self.v_rate.text = f"{d['rate'] * 100:g}%"
         self.v_net.text = money(d['net'])
@@ -845,7 +985,7 @@ class MyWidget(FloatLayout):
                    size=lambda w, v: setattr(dim, 'size', v))
 
         card = Panel(fill=PANEL, edge=ACCENT, cut=dp(18),
-                     size_hint=(0.92, None), height=dp(470),
+                     size_hint=(0.94, None), height=dp(570),
                      pos_hint={'center_x': 0.5, 'center_y': 0.55},
                      padding=[dp(16), dp(14)], spacing=dp(8))
         card.add_widget(L(T['lock_title'] if locked else T['act_title'],
@@ -853,7 +993,7 @@ class MyWidget(FloatLayout):
                           size_hint_y=None, height=dp(40)))
         card.add_widget(L(T['lock_body'].replace('{price}', str(PRICE_DA)),
                           color=TEXT, font_size=sp(14), size_hint_y=None,
-                          height=dp(84)))
+                          height=dp(116)))
         if T['contact']:
             card.add_widget(L(T['contact'], color=MUTED, font_size=sp(13),
                               size_hint_y=None, height=dp(24)))
@@ -872,6 +1012,31 @@ class MyWidget(FloatLayout):
         dev.add_widget(dev_in)
         card.add_widget(dev)
 
+        row2 = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(10),
+                         padding=[dp(6), 0])
+        cp = SkewButton(text=T['copy_id'], size_hint_x=0.38, bg=TAB_OFF,
+                        bg_down=PANEL_EDGE, fg=TEXT, font_size=sp(14))
+        wa = SkewButton(text=T['wa_send'], size_hint_x=0.62,
+                        bg=hexc('#1FA855'), bg_down=hexc('#17803F'),
+                        fg=(1, 1, 1, 1), font_size=sp(14))
+
+        def do_copy(*_):
+            try:
+                Clipboard.copy(self.lic.device_id)
+                msg.color = ACCENT
+                msg.text = ar(T['copied'])
+            except Exception:
+                pass
+
+        def do_wa(*_):
+            share_whatsapp(T['wa_msg'].format(id=self.lic.device_id),
+                           DEV_PHONE)
+        cp.bind(on_release=do_copy)
+        wa.bind(on_release=do_wa)
+        row2.add_widget(cp)
+        row2.add_widget(wa)
+        card.add_widget(row2)
+
         code_field = Field(T['code_lbl'], T['code_hint'], input_filter=None)
         code_field.input.halign = 'center'
         card.add_widget(code_field)
@@ -883,9 +1048,9 @@ class MyWidget(FloatLayout):
         btns = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(10),
                          padding=[dp(6), 0])
         if not locked:
-            later = SkewButton(text=T['later'], size_hint_x=0.45,
+            later = SkewButton(text=T['later'], size_hint_x=0.5,
                                bg=TAB_OFF, bg_down=PANEL_EDGE, fg=TEXT,
-                               fg_down=TEXT, font_size=sp(15))
+                               fg_down=TEXT, font_size=sp(14))
             later.bind(on_release=lambda *_: self._close_modal())
             btns.add_widget(later)
         go = SkewButton(text=T['do_activate'])
